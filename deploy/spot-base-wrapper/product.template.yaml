@@ -1,0 +1,30 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description:
+  Spot Dev Base Stack
+
+Metadata:
+  managed-by: dev-spot
+
+Parameters:
+  PersistenceEbsSize:
+    Type: Number
+    Description: Size of the ebs volume used for data persistence
+  az:
+    Type: String
+    Description: AZ in which ebs should be provisioned
+
+Resources:
+  SpotEbsVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Ref az
+      Size: !Ref PersistenceEbsSize
+      Encrypted: true
+      VolumeType: gp3
+      Tags:
+        - Key: Purpose
+          Value: DataPersistence
+        - Key: managed-by
+          Value: dev-spot
+

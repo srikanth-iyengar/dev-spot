@@ -1,0 +1,57 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description:
+  Dev Spot product template to launch spot ec2 instance on demand as a replacement to codespaces/gitpod
+
+Metadata:
+  managed-by: Dev Spot
+
+Parameters:
+  ttl:
+    Description: Number of hours till which the spot ec2 request should be active
+    Type: Number
+    Default: 4
+  PersistenceEbs:
+    Description: ARN of ebs used for data persistence
+    Type: String
+  UserInitScript:
+    Description: EC2 user data script to run at instance initialization
+    Type: String
+
+Resources:
+  SpotEc2Role:
+    Type: AWS::IAM::Role
+    Description: Iam role for ec2 fleet
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - spotfleet.amazonaws.com
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: spot
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'ec2:*'
+                Resource: '*'
+  SpotEc2:
+    Type: AWS::EC2::SpotFleet
+    Properties:
+      SpotFleetRequestConfigData:
+        AllocationStrategy: priceCapacityOptimized
+        IamFleetRole: !GetAtt [SpotEc2Role, Arn]
+        TargetCapacity: 1
+        LaunchSpecifications:
+          - EbsOptimized: 'false'
+            InstanceType: t3.micro
+            ImageId: ami-087d8c81764fb7292
+            SubnetId: subnet-0b3f8a26a7cd53747
+
+

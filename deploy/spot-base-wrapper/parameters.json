@@ -1,0 +1,10 @@
+[
+	{
+		"ParameterKey": "PersistenceEbsSize",
+		"ParameterValue": "10"
+	},
+	{
+		"ParameterKey": "az",
+		"ParameterValue": "ap-south-1c"
+	}
+]
