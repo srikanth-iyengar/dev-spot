@@ -7,51 +7,91 @@ Metadata:
   managed-by: Dev Spot
 
 Parameters:
-  ttl:
-    Description: Number of hours till which the spot ec2 request should be active
-    Type: Number
-    Default: 4
-  PersistenceEbs:
-    Description: ARN of ebs used for data persistence
+  DestroyAt:
+    Description: When to nuke the fleet stack
     Type: String
-  UserInitScript:
-    Description: EC2 user data script to run at instance initialization
-    Type: String
+  LaunchTemplateId:
+    Description: Launch template id created by dev-spot base wrapper
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/dev-spot/ec2-template-id'
+  FleetRole:
+    Description: Iam fleet role created by dev-spot base wrapper
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/dev-spot/iam-fleet-role'
+  StackManagementRole:
+    Description: Role created by dev-spot for stack management
+    Default: '/dev-spot/stack-management-role'
+    Type: AWS::SSM::Parameter::Value<String>
+  SourceS3Bucket:
+    Description: S3 init bucket
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/dev-spot/lambda-bucket'
 
 Resources:
-  SpotEc2Role:
-    Type: AWS::IAM::Role
-    Description: Iam role for ec2 fleet
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: 'Allow'
-            Principal:
-              Service:
-                - spotfleet.amazonaws.com
-                - ec2.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      Policies:
-        - PolicyName: spot
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action: 'ec2:*'
-                Resource: '*'
   SpotEc2:
     Type: AWS::EC2::SpotFleet
     Properties:
       SpotFleetRequestConfigData:
-        AllocationStrategy: priceCapacityOptimized
-        IamFleetRole: !GetAtt [SpotEc2Role, Arn]
         TargetCapacity: 1
-        LaunchSpecifications:
-          - EbsOptimized: 'false'
-            InstanceType: t3.micro
-            ImageId: ami-087d8c81764fb7292
-            SubnetId: subnet-0b3f8a26a7cd53747
+        Type: maintain
+        AllocationStrategy: capacityOptimized
+        IamFleetRole: !Ref FleetRole
+        LaunchTemplateConfigs:
+          - LaunchTemplateSpecification:
+              LaunchTemplateId: !Ref LaunchTemplateId
+              Version: '$Latest'
 
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: InvokeNukeStackLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt NukeStackFunction.Arn
+                  - !Sub '${NukeStackFunction.Arn}:*'
 
+  NukeStackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "nuke-stack-lambda"
+      Role: !Ref StackManagementRole
+      Code:
+        S3Bucket: !Ref SourceS3Bucket
+        S3Key: lambda/deploy.zip
+      Runtime: python3.14
+      Handler: self_destruct.lambda_handler
+      Environment:
+        Variables:
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+          S3_BUCKET: !Ref SourceS3Bucket
+          STACK_NAME: !Ref AWS::StackName
+
+  SelfDestructSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Self Destruct Stack Timer
+      Name: !Sub '${AWS::StackName}-self-destruct-timer'
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: !Sub 'at(${DestroyAt})'
+      ScheduleExpressionTimezone: UTC
+      Target:
+        Arn: !GetAtt NukeStackFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"source": "schedule"}'

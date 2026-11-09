@@ -7,12 +7,34 @@ Metadata:
   managed-by: dev-spot
 
 Parameters:
+  TTL:
+    Type: Number
+    Default: 4
+    Description: Default TTL to keep for the stack
   PersistenceEbsSize:
     Type: Number
     Description: Size of the ebs volume used for data persistence
   az:
     Type: String
     Description: AZ in which ebs should be provisioned
+  KeyPairName:
+    Type: String
+    Description: EC2 KeyPair name
+  BotPubKey:
+    Type: String
+    Description: Pubkey for the discord bot
+  SourceS3Bucket:
+    Type: String
+    Description: Bucket name where the dev-spot build is copied to.
+  DiscordPushWebhookUrl:
+    Type: String
+    Description: Webhook to send the status updates to discord
+  InstanceType:
+    Type: String
+    Description: Instance type to spin ec2
+  ImageId:
+    Type: String
+    Description: Image Id to be used for the dev-spot instance
 
 Resources:
   SpotEbsVolume:
@@ -28,3 +50,365 @@ Resources:
         - Key: managed-by
           Value: dev-spot
 
+  SpotEc2Role:
+    Type: AWS::IAM::Role
+    Description: Iam role for ec2 fleet
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - spotfleet.amazonaws.com
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: spot
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'ec2:*'
+                Resource: '*'
+
+  DevSpotKeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyFormat: pem
+      KeyName: !Ref KeyPairName
+      KeyType: rsa
+
+  SpotEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SpotEc2Role
+
+  SpotDevLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ImageId
+        KeyName: !Ref KeyPairName
+        InstanceType: !Ref InstanceType
+        Placement:
+          AvailabilityZone: !Ref az
+        IamInstanceProfile:
+          Arn: !GetAtt SpotEc2InstanceProfile.Arn
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+            aws ec2 attach-volume --region ${AWS::Region} --volume-id ${SpotEbsVolume} --instance-id $IID --device /dev/sdf
+            sleep 15
+
+            DEV=$(readlink -f /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol$(echo ${SpotEbsVolume} | cut -c5-))
+            blkid $DEV || mkfs.ext4 $DEV
+            mkdir -p /data
+            mount $DEV /data
+      LaunchTemplateName: dev-spot
+
+  BotPubKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/discord/bot/pubkey"
+      Type: String
+      Value: !Ref BotPubKey
+      DataType: text
+      Tier: Standard
+
+  DiscordWebhookLambdaRole:
+    Type: AWS::IAM::Role
+    Description: Iam role for dev spot bot execution
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - cloudwatch.amazonaws.com
+                - cloudformation.amazonaws.com
+                - s3.amazonaws.com
+                - ssm.amazonaws.com
+                - ec2.amazonaws.com
+                - scheduler.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: log-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:GetFunction'
+                  - 'lambda:DeleteFunction'
+                  - 'lambda:CreateFunction'
+                  - 'scheduler:GetSchedule'
+                  - 'scheduler:DeleteSchedule'
+                  - 'scheduler:CreateSchedule'
+                  - 'iam:DeleteRolePolicy'
+                  - 'iam:CreateRole'
+                  - 'iam:PutRolePolicy'
+                  - 'iam:GetRole'
+                  - 'iam:DeleteRole'
+                Resource: '*'
+        - PolicyName: cloudformation-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DeleteStack'
+                Resource: '*'
+        - PolicyName: s3-get
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                Resource: !Sub 'arn:aws:s3:::${SourceS3Bucket}/*'
+        - PolicyName: parameter-store
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:GetParameter'
+                  - 'ssm:GetParameters'
+                  - 'ssm:GetParametersByPath'
+                Resource: '*'
+        - PolicyName: fleet-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:RequestSpotFleet'
+                  - 'ec2:RunInstances'
+                  - 'ec2:DescribeSpotFleetRequests'
+                  - 'ec2:CancelSpotFleetRequests'
+                  - 'ec2:DescribeInstances'
+                Resource: '*'
+              - Effect: Allow
+                Action: 'iam:PassRole'
+                Resource: !GetAtt SpotEc2Role.Arn
+
+  DevSpotBotLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "dev-spot-lambda"
+      Role: !GetAtt [DiscordWebhookLambdaRole, Arn]
+      Code:
+        S3Bucket: !Ref SourceS3Bucket
+        S3Key: lambda/deploy.zip
+      Runtime: python3.14
+      Handler: main.lambda_handler
+      Environment:
+        Variables:
+          DISCORD_BOT_PUB_KEY: !Ref BotPubKey
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+          S3_BUCKET: !Ref SourceS3Bucket
+          CREATE_STACK_LAMBDA: "create-fleet-stack"
+
+  DevSpotCreateStackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "create-fleet-stack"
+      Role: !GetAtt [DiscordWebhookLambdaRole, Arn]
+      Code:
+        S3Bucket: !Ref SourceS3Bucket
+        S3Key: lambda/deploy.zip
+      Runtime: python3.14
+      Handler: create_stack.lambda_handler
+      Environment:
+        Variables:
+          DISCORD_BOT_PUB_KEY: !Ref BotPubKey
+          REGION: !Ref AWS::Region
+          ACCOUNT_ID: !Ref AWS::AccountId
+          S3_BUCKET: !Ref SourceS3Bucket
+          TTL: !Ref TTL
+
+  ## Api Gateway deployment
+  DiscordBotGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: discord-bot-gateway
+      Description: Discord bot gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  HandlerPathResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt DiscordBotGateway.RootResourceId
+      PathPart: discord
+      RestApiId: !Ref DiscordBotGateway
+
+  DiscordWebhookEndpoint:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref HandlerPathResource
+      RestApiId: !Ref DiscordBotGateway
+      Integration:
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DevSpotBotLambda.Arn}/invocations'
+        IntegrationHttpMethod: POST
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DevSpotBotLambda
+      Action: 'lambda:InvokeFunction'
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${DiscordBotGateway}/*/*'
+
+  DevSpotLambdaDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - DiscordWebhookEndpoint
+    Properties:
+      RestApiId: !Ref DiscordBotGateway
+      Description: Default Deployment
+      StageName: default
+
+  DevSpotPushNotificationsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "dev-spot-push-notifications"
+      Role: !GetAtt [DiscordWebhookLambdaRole, Arn]
+      Code:
+        S3Bucket: !Ref SourceS3Bucket
+        S3Key: lambda/deploy.zip
+      Runtime: python3.14
+      Handler: discord_push.lambda_handler
+      Environment:
+        Variables:
+          DISCORD_BOT_PUB_KEY: !Ref BotPubKey
+          WEBHOOK_URL: !Ref DiscordPushWebhookUrl
+
+  PushToDiscordOnCompletion:
+    Type: Custom::PushToDiscordOnCompletion
+    Properties:
+      ServiceToken: !GetAtt DevSpotPushNotificationsLambda.Arn
+      Message: !Sub "Initialized dev spot in account: ${AWS::AccountId}, region: ${AWS::Region}, Your discord integrations url is https://${DiscordBotGateway}.execute-api.${AWS::Region}.amazonaws.com/default"
+      ServiceTimeout: 120
+
+  LaunchTemplateParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/dev-spot/ec2-template-id"
+      Type: String
+      Value: !Ref SpotDevLaunchTemplate
+      DataType: text
+      Tier: Standard
+
+  FleetRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/dev-spot/iam-fleet-role"
+      Type: String
+      Value: !GetAtt SpotEc2Role.Arn
+      DataType: text
+      Tier: Standard
+
+  StackManagementRoleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/dev-spot/stack-management-role"
+      Type: String
+      Value: !GetAtt DiscordWebhookLambdaRole.Arn
+      DataType: text
+      Tier: Standard
+
+  S3BucketParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: "/dev-spot/lambda-bucket"
+      Type: String
+      Value: !Ref SourceS3Bucket
+      DataType: text
+      Tier: Standard
+
+  DiscordWebhookLambdaSelfPassPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: pass-self
+      Roles:
+        - !Ref DiscordWebhookLambdaRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !GetAtt DiscordWebhookLambdaRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - lambda.amazonaws.com
+                  - cloudformation.amazonaws.com
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*-SchedulerInvokeRole-*'
+            Condition:
+              StringEquals:
+                iam:PassedToService: scheduler.amazonaws.com
+
+  PushEc2IpToDiscordFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: "push-ec2-ip-to-discord"
+      Role: !GetAtt [DiscordWebhookLambdaRole, Arn]
+      Code:
+        S3Bucket: !Ref SourceS3Bucket
+        S3Key: lambda/deploy.zip
+      Runtime: python3.14
+      Handler: push_ec2_ip.lambda_handler
+      Timeout: 60
+      Environment:
+        Variables:
+          WEBHOOK_URL: !Ref DiscordPushWebhookUrl
+
+  Ec2StateRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-ec2-state-change"
+      Description: Notify Discord with IPs when an EC2 instance changes state
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - running
+            - stopped
+            - terminated
+      Targets:
+        - Id: DiscordNotifier
+          Arn: !GetAtt PushEc2IpToDiscordFunction.Arn
+
+  Ec2StateRuleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PushEc2IpToDiscordFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt Ec2StateRule.Arn
