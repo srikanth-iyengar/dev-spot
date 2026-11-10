@@ -20,6 +20,7 @@ Parameters:
   KeyPairName:
     Type: String
     Description: EC2 KeyPair name
+    Default: "dev-spot-key-pair"
   BotPubKey:
     Type: String
     Description: Pubkey for the discord bot
@@ -35,6 +36,10 @@ Parameters:
   ImageId:
     Type: String
     Description: Image Id to be used for the dev-spot instance
+  BootstrapScript:
+    Type: String
+    Description: Bootstrap script for the ec2
+    Default: ''
 
 Resources:
   SpotEbsVolume:
@@ -110,6 +115,8 @@ Resources:
             blkid $DEV || mkfs.ext4 $DEV
             mkdir -p /data
             mount $DEV /data
+
+            ${BootstrapScript}
       LaunchTemplateName: dev-spot
 
   BotPubKeyParam:

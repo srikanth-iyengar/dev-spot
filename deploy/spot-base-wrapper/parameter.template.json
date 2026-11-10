@@ -1,0 +1,34 @@
+[
+	{
+		"ParameterKey": "PersistenceEbsSize",
+		"ParameterValue": "<ebsSize>"
+	},
+	{
+		"ParameterKey": "az",
+		"ParameterValue": "<az>"
+	},
+	{
+		"ParameterKey": "BotPubKey",
+		"ParameterValue": "<botPubKey>"
+	},
+	{
+		"ParameterKey": "SourceS3Bucket",
+		"ParameterValue": "<bucket>"
+	},
+	{
+		"ParameterKey": "DiscordPushWebhookUrl",
+		"ParameterValue": "<discordWebHook>"
+	},
+	{
+		"ParameterKey": "ImageId",
+		"ParameterValue": "<ec2Ami>"
+	},
+	{
+		"ParameterKey": "InstanceType",
+		"ParameterValue": "<instanceType>"
+	},
+	{
+		"ParameterKey": "BootstrapScript",
+		"ParameterValue": "<BootstrapScript>"
+	}
+]
